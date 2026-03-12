@@ -1,16 +1,29 @@
+const { google } = require('googleapis');
 const nodemailer = require('nodemailer');
 const { logCorreo, getAllCorreos } = require('../repositories/correos.repository');
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 15000,
-});
+function createTransporter() {
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.GMAIL_CLIENT_ID,
+    process.env.GMAIL_CLIENT_SECRET,
+    'https://developers.google.com/oauthplayground'
+  );
+
+  oauth2Client.setCredentials({
+    refresh_token: process.env.GMAIL_REFRESH_TOKEN,
+  });
+
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      type: 'OAuth2',
+      user: process.env.SMTP_USER,
+      clientId: process.env.GMAIL_CLIENT_ID,
+      clientSecret: process.env.GMAIL_CLIENT_SECRET,
+      refreshToken: process.env.GMAIL_REFRESH_TOKEN,
+    },
+  });
+}
 
 async function enviar(req, res, next) {
   try {
@@ -32,6 +45,8 @@ async function enviar(req, res, next) {
       const cuerpo = cuerpo_custom || buildCuerpo(orden);
 
       try {
+        const transporter = createTransporter();
+
         const info = await transporter.sendMail({
           from: `"GCC México — Compras" <${process.env.SMTP_USER}>`,
           to: orden.sup_email,
