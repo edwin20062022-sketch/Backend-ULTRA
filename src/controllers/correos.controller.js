@@ -1,28 +1,45 @@
 const { google } = require('googleapis');
-const nodemailer = require('nodemailer');
 const { logCorreo, getAllCorreos } = require('../repositories/correos.repository');
 
-function createTransporter() {
+function getGmailClient() {
   const oauth2Client = new google.auth.OAuth2(
     process.env.GMAIL_CLIENT_ID,
     process.env.GMAIL_CLIENT_SECRET,
     'https://developers.google.com/oauthplayground'
   );
-
   oauth2Client.setCredentials({
     refresh_token: process.env.GMAIL_REFRESH_TOKEN,
   });
+  return google.gmail({ version: 'v1', auth: oauth2Client });
+}
 
-  return nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      type: 'OAuth2',
-      user: process.env.SMTP_USER,
-      clientId: process.env.GMAIL_CLIENT_ID,
-      clientSecret: process.env.GMAIL_CLIENT_SECRET,
-      refreshToken: process.env.GMAIL_REFRESH_TOKEN,
-    },
-  });
+function buildEmailRaw({ to, from, subject, html, text }) {
+  const boundary = 'gcc_boundary_001';
+  const message = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    '',
+    text,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset=UTF-8',
+    '',
+    html,
+    '',
+    `--${boundary}--`,
+  ].join('\r\n');
+
+  return Buffer.from(message)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
 }
 
 async function enviar(req, res, next) {
@@ -32,6 +49,7 @@ async function enviar(req, res, next) {
       return res.status(400).json({ error: 'Se requiere al menos una orden' });
     }
 
+    const gmail = getGmailClient();
     const resultados = [];
 
     for (const orden of ordenes) {
@@ -43,27 +61,31 @@ async function enviar(req, res, next) {
       const asunto = asunto_custom ||
         `Seguimiento Orden de Compra PO-${orden.po_id} — GCC México`;
       const cuerpo = cuerpo_custom || buildCuerpo(orden);
+      const htmlBody = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+        <div style="background:#192b8d;padding:20px;text-align:center">
+          <h2 style="color:#fff;margin:0;letter-spacing:2px">GCC MÉXICO</h2>
+          <p style="color:rgba(255,255,255,0.7);margin:4px 0 0;font-size:12px">Departamento de Compras — Expeditación</p>
+        </div>
+        <div style="padding:28px;background:#f8f9fc;border:1px solid #e0e4ef">
+          <pre style="font-family:Arial,sans-serif;font-size:14px;line-height:1.8;white-space:pre-wrap;color:#1a1a2e">${cuerpo}</pre>
+        </div>
+        <div style="background:#192b8d;padding:12px;text-align:center">
+          <p style="color:rgba(255,255,255,0.5);font-size:11px;margin:0">GCC México · expeditacion@gcc.com.mx</p>
+        </div>
+      </div>`;
 
       try {
-        const transporter = createTransporter();
-
-        const info = await transporter.sendMail({
-          from: `"GCC México — Compras" <${process.env.SMTP_USER}>`,
+        const raw = buildEmailRaw({
           to: orden.sup_email,
+          from: `"GCC México — Compras" <${process.env.SMTP_USER}>`,
           subject: asunto,
-          html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-            <div style="background:#192b8d;padding:20px;text-align:center">
-              <h2 style="color:#fff;margin:0;letter-spacing:2px">GCC MÉXICO</h2>
-              <p style="color:rgba(255,255,255,0.7);margin:4px 0 0;font-size:12px">Departamento de Compras — Expeditación</p>
-            </div>
-            <div style="padding:28px;background:#f8f9fc;border:1px solid #e0e4ef">
-              <pre style="font-family:Arial,sans-serif;font-size:14px;line-height:1.8;white-space:pre-wrap;color:#1a1a2e">${cuerpo}</pre>
-            </div>
-            <div style="background:#192b8d;padding:12px;text-align:center">
-              <p style="color:rgba(255,255,255,0.5);font-size:11px;margin:0">GCC México · expeditacion@gcc.com.mx</p>
-            </div>
-          </div>`,
+          html: htmlBody,
           text: cuerpo,
+        });
+
+        const response = await gmail.users.messages.send({
+          userId: 'me',
+          requestBody: { raw },
         });
 
         await logCorreo({
@@ -74,7 +96,7 @@ async function enviar(req, res, next) {
           asunto,
           cuerpo,
           enviado_por:         req.user.id,
-          resend_id:           info.messageId || null,
+          resend_id:           response.data.id || null,
           estado:              'enviado',
         });
 
